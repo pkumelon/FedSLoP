@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual envs
+.venv/
+venv/
+ENV/
+
+# IDE
+.vscode/
+
+# Outputs
+logs/
+picture/
+notes/*.log
+
+# Data (large / re-downloadable)
+data/torch_datasets/
+
+# OS
+.DS_Store
+Thumbs.db
