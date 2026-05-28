@@ -1,6 +1,6 @@
-# FedSLop
+# FedSLoP
 
-Paper: *FedSLoP: Memory-Efficient Federated Learning with Low-Rank Gradient Projection*.
+Paper: [*FedSLoP: Memory-Efficient Federated Learning with Low-Rank Gradient Projection*](https://arxiv.org/abs/2604.24012).
 
 This repository provides minimal code to reproduce the experiments reported in the paper.
 
@@ -106,5 +106,12 @@ python scripts\run_num_clients_sweep.py `
 
 ## Citation
 
-TODO
+```bibtex
+@article{he2026fedslop,
+  title={FedSLoP: Memory-Efficient Federated Learning with Low-Rank Gradient Projection},
+  author={He, Yutong and Huang, Zhengyang and Geng, Jiahe},
+  journal={arXiv preprint arXiv:2604.24012},
+  year={2026}
+}
+```
 
