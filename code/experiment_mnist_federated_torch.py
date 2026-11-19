@@ -1,3 +1,9 @@
+"""Original MNIST prototype and accuracy-reproduction entry point.
+
+The historical uplink_elems field counts dense simulator objects. For explicit
+projected message encoding and tensor-byte accounting, use mnist_matched.py.
+"""
+
 import argparse
 import os
 from typing import List, Tuple, Dict

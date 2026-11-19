@@ -1,0 +1,4 @@
+method,peak_median_bytes,peak_min_bytes,peak_max_bytes,momentum_bytes,basis_bytes
+FedSLoP,2454016,2454016,2454016,62376,408576
+FedAvg-M,1982464,1982464,1982464,0,0
+Full-client-momentum,2390016,2390016,2390016,407080,0

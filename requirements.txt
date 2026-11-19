@@ -3,3 +3,5 @@ pandas
 tqdm
 torch
 torchvision
+filelock
+matplotlib

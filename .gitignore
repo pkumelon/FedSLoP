@@ -18,6 +18,7 @@ notes/*.log
 
 # Data (large / re-downloadable)
 data/torch_datasets/
+data/reproduced/
 
 # OS
 .DS_Store
