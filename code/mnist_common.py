@@ -36,23 +36,19 @@ def load_mnist(data_root):
         return MNIST(data_root, train=True, download=True), MNIST(data_root, train=False, download=True)
 
 
-def partition(labels, seed, validation=False):
+def partition(labels, seed):
     rng = np.random.RandomState(seed)
     clients = [[] for _ in range(50)]
-    held_out = []
     for label in range(10):
         indices = np.flatnonzero(labels.numpy() == label)
         rng.shuffle(indices)
-        if validation:
-            held_out.extend(indices[:500])
-            indices = indices[500:]
         weights = rng.dirichlet([0.1] * len(clients))
         ends = (np.cumsum(weights) * len(indices)).astype(int)[:-1]
         for client, shard in zip(clients, np.split(indices, ends)):
             client.extend(shard)
     for client in clients:
         rng.shuffle(client)
-    return [torch.tensor(x, dtype=torch.long) for x in clients if x], torch.tensor(held_out, dtype=torch.long)
+    return [torch.tensor(x, dtype=torch.long) for x in clients if x]
 
 
 def configure_fp32():
@@ -73,7 +69,7 @@ def batches(dataset, ids, seed, round_id, client_id, device):
         yield normalize(dataset.data[subset].to(device)), dataset.targets[subset].to(device)
 
 
-def input_bases(params, rank, seed, round_id, device, *, coordinate=False):
+def coordinate_bases(params, rank, seed, round_id, device):
     generator = seed_generator(seed, 2, round_id)
     bases = {}
     for name, weight in params.items():
@@ -81,14 +77,10 @@ def input_bases(params, rank, seed, round_id, device, *, coordinate=False):
             continue
         width = weight.shape[1]
         retained = min(width, rank)
-        if coordinate:
-            indices = torch.randperm(width, generator=generator)[:retained]
-            signs = torch.randint(2, (retained,), generator=generator).mul_(2).sub_(1)
-            p = torch.zeros(width, retained)
-            p[indices, torch.arange(retained)] = signs.float() * (width / retained) ** 0.5
-        else:
-            q, r = torch.linalg.qr(torch.randn(width, retained, generator=generator), mode="reduced")
-            p = q * torch.where(r.diagonal() < 0, -1.0, 1.0)
+        indices = torch.randperm(width, generator=generator)[:retained]
+        signs = torch.randint(2, (retained,), generator=generator).mul_(2).sub_(1)
+        p = torch.zeros(width, retained)
+        p[indices, torch.arange(retained)] = signs.float() * (width / retained) ** 0.5
         bases[name] = p.to(device)
     return bases
 
@@ -96,17 +88,6 @@ def input_bases(params, rank, seed, round_id, device, *, coordinate=False):
 def client_momentum(params, bases):
     return {name: p.new_zeros((p.shape[0], bases[name].shape[1])) if name in bases
             else torch.zeros_like(p) for name, p in params.items()}
-
-
-@torch.no_grad()
-def momentum_step(params, bases, state, lr, coefficient=0.9):
-    for name, p in params.items():
-        basis = bases.get(name)
-        gradient = p.grad if basis is None else p.grad @ basis
-        direction = gradient
-        if state:
-            direction = state[name].mul_(coefficient).add_(gradient)
-        p.add_(direction if basis is None else direction @ basis.T, alpha=-lr)
 
 
 @torch.no_grad()

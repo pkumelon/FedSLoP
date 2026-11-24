@@ -1,2 +1,0 @@
-method,lr,accuracy_mean,accuracy_sd,uplink_bytes,downlink_bytes
-FedMuon-SVD,0.01839685275139246,0.9641666666666667,0.0063610795729446435,411288000,1220688000

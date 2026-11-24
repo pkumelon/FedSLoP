@@ -1,4 +1,4 @@
-"""Run validation-only learning-rate screens, then paired formal comparisons."""
+"""Run the final MNIST and CIFAR-10 benchmarks."""
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
@@ -15,19 +15,18 @@ import sys
 from filelock import FileLock
 
 MNIST_LR = 0.01839685275139246
-MNIST_GRID = tuple(str(MNIST_LR * factor) for factor in (0.5, 1., 2.))
 CIFAR_GRID = ("0.015", "0.03", "0.06", "0.09", "0.12")
-MNIST_ARMS = ("FedSLoP", "FedAvg-M", "FedSub-CD")
-CIFAR_ARMS = (*MNIST_ARMS, "FedLoRA-M")
+METHODS = {
+    "mnist": ("FedSub-CD", "FedMuon", "FedMuon-SVD"),
+    "cifar": ("FedSLoP", "FedAvg-M", "FedSub-CD", "FedLoRA-M"),
+}
 CODE = Path(__file__).resolve().parents[1] / "code"
 
 
 def case_command(args, method, seed, lr, path, tuning):
     if args.dataset == "mnist":
         script = CODE / "mnist_matched.py"
-        flags = ["--active-clients", "10", "--rounds", "20" if tuning else "100"]
-        if tuning:
-            flags.append("--tune")
+        flags = ["--rounds", "100"]
     else:
         script = CODE / "cifar10_resnet20.py"
         rank = "0.75" if method in ("FedSLoP", "FedSub-CD", "FedLoRA-M") else "1"
@@ -41,10 +40,6 @@ def case_command(args, method, seed, lr, path, tuning):
             flags.extend(["--fedslop-server-momentum", "--inplace-projected-step"])
         if tuning:
             flags.append("--tuning")
-    if method == "FedMuon-SVD":
-        flags.extend(["--svd-rank-rule", args.svd_rank_rule, "--svd-fraction", str(args.svd_fraction)])
-    if args.svd_uplink_budget is not None:
-        flags.extend(["--svd-uplink-budget", str(args.svd_uplink_budget)])
     return [
         sys.executable, "-u", str(script), "--method", method, "--seed", str(seed), "--lr", lr,
         "--output", str(path), "--data-root", str(args.data_root), "--device", args.device, *flags,
@@ -61,10 +56,6 @@ def run_case(args, method, seed, lr, path, tuning, *, cuda_device=None):
     if (path / "done").exists():
         cfg = json.loads((path / "config.json").read_text())
         assert cfg["method"] == method and cfg["seed"] == seed and cfg["lr"] == float(lr), cfg
-        if method == "FedMuon-SVD":
-            assert cfg.get("svd_rank_rule", "payload") == args.svd_rank_rule, cfg
-            assert cfg.get("svd_fraction", 0.05) == args.svd_fraction, cfg
-        assert cfg.get("svd_uplink_budget") == args.svd_uplink_budget, cfg
         return read_result(path)
     if path.exists():
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
@@ -118,24 +109,19 @@ def main():
     p.add_argument("--dataset", choices=("mnist", "cifar"), required=True)
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--data-root", type=Path, required=True)
-    p.add_argument("--method", choices=(*CIFAR_ARMS, "FedMuon", "FedMuon-SVD"),
-                   help="Run one method. The default runs the dataset's matched baselines.")
-    p.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
-    p.add_argument("--svd-rank-rule", choices=("payload", "matrix"), default="payload",
-                   help="Choose the published code's payload rule or the paper's matrix-rank rule.")
-    p.add_argument("--svd-fraction", type=float, default=0.05)
-    p.add_argument("--svd-uplink-budget", type=int, help="Per-client byte limit for matched-uplink FedMuon-SVD.")
+    p.add_argument("--method", help="Run one method from the selected dataset's comparison.")
+    p.add_argument("--device", choices=("cuda", "cpu"), help="Defaults to CPU for MNIST and CUDA for CIFAR-10.")
     p.add_argument("--cuda-devices", nargs="+", help="Schedule independent runs over these GPU indices.")
-    p.add_argument("--tune-only", action="store_true", help="Save validation selection and defer formal runs.")
+    p.add_argument("--tune-only", action="store_true", help="Run only CIFAR-10 learning-rate selection.")
     args = p.parse_args()
-    if args.dataset == "mnist" and args.method == "FedLoRA-M":
-        p.error("The matched FedLoRA-M implementation is available for --dataset cifar")
-    if args.svd_rank_rule == "matrix" and args.method != "FedMuon-SVD":
-        p.error("--svd-rank-rule matrix requires --method FedMuon-SVD")
-    if not 0 < args.svd_fraction <= 1:
-        p.error("--svd-fraction must be in (0, 1]")
-    if args.svd_uplink_budget is not None and (args.svd_uplink_budget <= 0 or args.method != "FedMuon-SVD"):
-        p.error("--svd-uplink-budget requires a positive byte budget and --method FedMuon-SVD")
+    if args.method and args.method not in METHODS[args.dataset]:
+        p.error(f"--method for {args.dataset} must be one of: {', '.join(METHODS[args.dataset])}")
+    if args.tune_only and args.dataset != "cifar":
+        p.error("--tune-only requires --dataset cifar")
+    if args.device is None:
+        args.device = "cpu" if args.dataset == "mnist" else "cuda"
+    if args.cuda_devices and args.device != "cuda":
+        p.error("--cuda-devices requires --device cuda")
     os.environ.setdefault("OMP_NUM_THREADS", "2")
     args.output.mkdir(parents=True, exist_ok=True)
     # Serialize schedulers targeting the same output so independent jobs can safely resume it.
@@ -143,37 +129,45 @@ def main():
         run_comparison(args)
 
 
-def run_comparison(args):
-    grid = MNIST_GRID if args.dataset == "mnist" else CIFAR_GRID
-    arms = (args.method,) if args.method else MNIST_ARMS if args.dataset == "mnist" else CIFAR_ARMS
+def select_cifar_rates(args, arms):
     rates = {}
     for method in arms:
-        cases = [(method, 0, lr, args.output / "tuning" / method / lr, True) for lr in grid]
+        cases = [(method, 0, lr, args.output / "tuning" / method / lr, True) for lr in CIFAR_GRID]
         scores = {lr: None if row is None else float(row["accuracy"])
-                  for lr, row in zip(grid, run_cases(args, cases))}
-        valid = [lr for lr in grid if scores[lr] is not None]
+                  for lr, row in zip(CIFAR_GRID, run_cases(args, cases))}
+        valid = [lr for lr in CIFAR_GRID if scores[lr] is not None]
         if not valid:
-            raise RuntimeError(f"All shared-grid candidates diverged for {method}")
+            raise RuntimeError(f"All validation candidates diverged for {method}")
         chosen = max(valid, key=lambda lr: (scores[lr], -float(lr)))
         rates[method] = {"lr": chosen, "validation_scores": scores}
         print(f"selected {method} {chosen}", flush=True)
     (args.output / "selected_lr.json").write_text(json.dumps(rates, indent=2) + "\n")
+    return {method: result["lr"] for method, result in rates.items()}
+
+
+def run_comparison(args):
+    arms = (args.method,) if args.method else METHODS[args.dataset]
+    mnist = args.dataset == "mnist"
+    rates = {method: str(MNIST_LR) for method in arms} if mnist else select_cifar_rates(args, arms)
     if args.tune_only:
         return
 
     summary = []
-    for method in arms:
-        chosen = rates[method]["lr"]
+    for method, chosen in rates.items():
         cases = [(method, seed, chosen, args.output / method / f"seed-{seed}", False)
                  for seed in (0, 1, 2)]
         rows = run_cases(args, cases)
         values = [float(row["accuracy"]) for row in rows]
-        for key in ("uplink", "downlink"):
-            column = f"cumulative_{key}_bytes" if args.dataset == "cifar" else f"cumulative_{'up' if key == 'uplink' else 'down'}"
-            assert len({row[column] for row in rows}) == 1
-        summary.append({"method": method, "lr": chosen, "accuracy_mean": mean(values), "accuracy_sd": stdev(values),
-                        "uplink_bytes": rows[0].get("cumulative_uplink_bytes", rows[0].get("cumulative_up")),
-                        "downlink_bytes": rows[0].get("cumulative_downlink_bytes", rows[0].get("cumulative_down"))})
+        if mnist:
+            uplink_field = "uplink_bytes_per_client_round"
+            payloads = [int(row["uplink_bytes"]) // 10 for row in rows]
+        else:
+            uplink_field = "total_uplink_bytes"
+            payloads = [int(row["cumulative_uplink_bytes"]) for row in rows]
+        if len(set(payloads)) != 1:
+            raise ValueError(f"Inconsistent uplink totals for {method}: {payloads}")
+        summary.append({"method": method, "lr": chosen, "accuracy_mean": mean(values),
+                        "accuracy_sd": stdev(values), uplink_field: payloads[0]})
     with (args.output / "summary.csv").open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=tuple(summary[0]))
         writer.writeheader()

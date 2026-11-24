@@ -191,7 +191,7 @@ class FederatedComparison:
         self.local_buffers = dict(self.clientside.named_buffers())
         self.ranks = {}
         for name, param in self.params.items():
-            if param.ndim != 4 or args.method in ("FedAvg-M", "FedLoRA-M", "FedMuon", "FedMuon-SVD"):
+            if param.ndim != 4 or args.method in ("FedAvg-M", "FedLoRA-M"):
                 continue
             width = param.shape[0]
             rank = max(1, int(width * args.rank_ratio))
@@ -201,16 +201,6 @@ class FederatedComparison:
         self.server_momentum = {}
         self.client_dual = [{} for _ in range(args.clients)]
         self.bases = self.draw_bases(0)
-        self.muon = None
-        if args.method in ("FedMuon", "FedMuon-SVD"):
-            from fedmuon_matched import FedMuon
-            self.muon = FedMuon(
-                self.params, args.client_momentum, compress_momentum=args.method == "FedMuon-SVD",
-                svd_rank_rule=getattr(args, "svd_rank_rule", "payload"),
-                svd_fraction=getattr(args, "svd_fraction", 0.05),
-                uplink_budget=getattr(args, "svd_uplink_budget", None),
-                buffer_bytes=tensor_bytes(self.local_buffers.values()),
-            )
 
     def draw_bases(self, round_id):
         generator = seeded_generator(self.args.seed, 2, round_id)
@@ -240,9 +230,6 @@ class FederatedComparison:
 
     @torch.no_grad()
     def local_step(self, increments, momentum, dual, lr):
-        if self.muon:
-            self.muon.step(self.local_params, momentum, lr, self.args.weight_decay)
-            return
         for name, param in self.local_params.items():
             gradient = param.grad
             if param.ndim == 4 or name == "classifier.weight" or (self.lora_ranks and param.ndim == 2):
@@ -283,8 +270,6 @@ class FederatedComparison:
                 if name in self.ranks else torch.zeros_like(param)
                 for name, param in self.local_params.items()
             }
-        if self.muon:
-            momentum = self.muon.initial_state()
         return increments, momentum
 
     @torch.no_grad()
@@ -312,9 +297,6 @@ class FederatedComparison:
             downlink += 8
         if round_id == 0:
             downlink += self.frozen_base_bytes
-        if self.muon:
-            downlink += self.muon.downlink_bytes()
-            self.muon.start_round()
 
         for client_id in range(args.clients):
             self.load_global_model()
@@ -329,12 +311,7 @@ class FederatedComparison:
             with torch.no_grad():
                 upload = self.encode_client_upload(increments)
                 total_uplink += tensor_bytes(self.local_buffers.values())
-                if self.muon:
-                    upload, sent_bytes = self.muon.transmit_model_delta(upload)
-                    total_uplink += sent_bytes
-                    total_uplink += self.muon.accept(upload, momentum, args.local_steps, lr)
-                else:
-                    total_uplink += tensor_bytes(upload.values())
+                total_uplink += tensor_bytes(upload.values())
                 if args.method == "FedSub-CD":
                     selected_updates.append(increments)
                 for name, value in upload.items():
@@ -367,8 +344,6 @@ class FederatedComparison:
                     value.div_(args.clients)
                 buf.copy_(value)
 
-            if self.muon:
-                self.muon.finish_round(args.clients)
             if self.bases:
                 next_bases = self.draw_bases(round_id + 1)
                 if args.method == "FedSub-CD":
@@ -412,9 +387,6 @@ def run(args):
             for name, param in training.params.items()
         )
         metadata["client_basis_bytes"] = tensor_bytes(training.bases.values())
-    if training.muon:
-        metadata["fedmuon_momentum_svd_ranks"] = training.muon.momentum_ranks
-        metadata["fedmuon_delta_svd_ranks"] = training.muon.delta_ranks
     metadata["client_sizes"] = list(map(len, benchmark.clients))
     metadata["torch_version"] = torch.__version__
     metadata["cuda_device"] = torch.cuda.get_device_name(device) if device.type == "cuda" else None
@@ -457,7 +429,7 @@ def run(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-root", type=Path, required=True)
-    parser.add_argument("--method", choices=("FedSLoP", "FedAvg-M", "FedSub-CD", "FedLoRA-M", "FedMuon", "FedMuon-SVD"), required=True)
+    parser.add_argument("--method", choices=("FedSLoP", "FedAvg-M", "FedSub-CD", "FedLoRA-M"), required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--rounds", type=int, default=200)
     parser.add_argument("--eval-every", type=int, default=10)
@@ -467,9 +439,6 @@ def main():
     parser.add_argument("--alpha", type=float, default=0.3)
     parser.add_argument("--lr", type=float, required=True)
     parser.add_argument("--rank-ratio", type=float, default=0.125)
-    parser.add_argument("--svd-rank-rule", choices=("payload", "matrix"), default="payload")
-    parser.add_argument("--svd-fraction", type=float, default=0.05)
-    parser.add_argument("--svd-uplink-budget", type=int, help="Maximum bytes per client and round for both SVD messages.")
     parser.add_argument("--client-momentum", type=float, default=0.8)
     parser.add_argument("--server-momentum", type=float, default=0.9)
     parser.add_argument("--fedslop-server-momentum", action="store_true",
@@ -485,10 +454,6 @@ def main():
     evaluation.add_argument("--tuning", action="store_true", help="Use validation and a constant learning rate.")
     evaluation.add_argument("--validation", action="store_true", help="Use validation with the regular LR schedule.")
     args = parser.parse_args()
-    if not 0 < args.svd_fraction <= 1:
-        parser.error("--svd-fraction must be in (0, 1]")
-    if args.svd_uplink_budget is not None and (args.svd_uplink_budget <= 0 or args.method != "FedMuon-SVD"):
-        parser.error("--svd-uplink-budget requires a positive byte budget and --method FedMuon-SVD")
     if not (0 < args.rank_ratio <= 1):
         parser.error("--rank-ratio must be in (0, 1]")
     if not (0 <= args.client_momentum < 1):

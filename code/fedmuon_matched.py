@@ -4,8 +4,8 @@ Uses the authors' five-step Newton–Schulz coefficients for matrix
 orthogonalization, with FP32 arithmetic and the benchmark's shared momentum.
 
 Reference: https://arxiv.org/abs/2510.27403
-An optional uplink_budget additionally compresses model increments; this is
-our matched-uplink extension, denoted FedMuon-SVD dagger in the saved tables.
+FedMuon-SVD dagger compresses both momentum and model increments under a
+shared uplink budget.
 """
 
 import torch
@@ -63,33 +63,20 @@ def model_delta_ranks(params, budget):
 
 
 class FedMuon:
-    def __init__(self, params, coefficient, *, compress_momentum=False, svd_rank_rule="payload",
-                 svd_fraction=SVD_FRACTION, uplink_budget=None, buffer_bytes=0):
-        if not 0 < svd_fraction <= 1:
-            raise ValueError("The SVD retained fraction must be in (0, 1]")
+    def __init__(self, params, coefficient, *, uplink_budget=None):
         self.coefficient = coefficient
         self.momentum = {name: torch.zeros_like(value) for name, value in params.items() if value.ndim >= 2}
         self.direction = {name: torch.zeros_like(value) for name, value in params.items()}
         self.momentum_ranks = None
-        if compress_momentum:
-            self.momentum_ranks = {}
-            for name, value in self.momentum.items():
-                m = value.shape[0]
-                n = value.numel() // m
-                if svd_rank_rule == "matrix":
-                    # The paper specifies a fraction of rank. Keep one component for small matrices.
-                    rank = max(1, int(svd_fraction * min(m, n)))
-                else:
-                    # The released code budgets the FP32 U, singular values, and Vh payload.
-                    rank = int(svd_fraction * (m * n) / (m + n + 1))
-                self.momentum_ranks[name] = rank
         self.delta_ranks = None
         if uplink_budget is not None:
-            if self.momentum_ranks is None:
-                raise ValueError("A model-delta SVD budget requires momentum SVD")
+            self.momentum_ranks = {
+                name: max(1, int(SVD_FRACTION * min(value.shape)))
+                for name, value in self.momentum.items()
+            }
             momentum_bytes = sum(svd_component_bytes(self.momentum[name]) * rank
                                  for name, rank in self.momentum_ranks.items())
-            self.delta_ranks = model_delta_ranks(params, uplink_budget - buffer_bytes - momentum_bytes)
+            self.delta_ranks = model_delta_ranks(params, uplink_budget - momentum_bytes)
 
     def initial_state(self):
         return {name: value.clone() for name, value in self.momentum.items()}

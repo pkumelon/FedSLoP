@@ -4,4 +4,3 @@ tqdm
 torch
 torchvision
 filelock
-matplotlib
