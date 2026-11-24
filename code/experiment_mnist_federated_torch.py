@@ -783,7 +783,7 @@ def main():
     parser.add_argument("--output", type=str, default="data/mnist_fed_results.csv")
     # --- 超参配置（统一压缩比设置）---
     parser.add_argument("--proj_rank", type=int, default=64, help="FedSLop 的投影秩（决定梯度子空间覆盖率）")
-    parser.add_argument("--fedslop_momentum", type=float, default=0.8, help="FedSLop 的动量系数")
+    parser.add_argument("--fedslop_momentum", type=float, default=0.9, help="FedSLop 的动量系数")
     parser.add_argument("--sparsity", type=float, default=0.2, help="FedMef 的稀疏度（每轮更新比例）")
     parser.add_argument("--select_ratio", type=float, default=0.1, help="FederatedSelect 的坐标选择比例")
     parser.add_argument("--num_blocks", type=int, default=4, help="NeuLite 的分块数（每轮更新 1/num_blocks）")

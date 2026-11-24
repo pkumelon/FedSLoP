@@ -42,7 +42,7 @@ python code\experiment_mnist_federated_torch.py `
   --rounds 100 --num_clients 50 --alpha 0.1 `
   --local_epochs 1 --batch_size 32 --lr 0.018 `
   --client_fraction 0.2 --seeds 0,1,2 --device cpu `
-  --proj_rank 112 --fedslop_momentum 0.8 `
+  --proj_rank 112 --fedslop_momentum 0.9 `
   --sparsity 0.15 --select_ratio 0.15 --block_ratio 0.15 `
   --output data\mnist_main_methods.csv
 ```
